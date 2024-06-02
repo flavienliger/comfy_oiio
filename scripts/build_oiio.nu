@@ -1,4 +1,5 @@
 let oiio_root = (git grab https://github.com/AcademySoftwareFoundation/OpenImageIO)
+let reset = false
 # let root = ($env.PWD)
 let root = $oiio_root
 
