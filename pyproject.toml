@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfy-oiio"
+dynamic = ["version"]
+description = "OpenImageIO plugin for ComfyUI"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+readme = "README.md"
+# repository = "https://github.com/melMass/comfy_oiio"
+dependencies = ["opencolorio"]
+optional-dependencies = { test = ["pytest", "pytest-cov", "tox"] }
+authors = [{ name = "Mel Massadian" }]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Intended Audience :: Developers",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+# include = ["comfy_oiio.*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "comfy_oiio.__version__" }
+
+[tool.pyright]
+reportMissingTypeArgument = true # Report generic classes used without type arguments
+strictListInference = true       # Use union types when inferring types of lists elements, instead of Any
+reportMissingTypeStubs = false
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+
+[tool.ruff]
+line-length = 100
+select = ["A", "B", "C", "D", "E", "F", "FBT", "I", "N", "S", "SIM", "UP", "W"]
+extend-exclude = ["./docs/conf.py"]                                             # exclude auto generated file
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"] # imported but unused
+"tests/*" = ["S101"] # use of assert detected
+"scripts/*" = [
+  "D103", # missing docstring in public function
+  "S603", # check for execution of untrusted input
+  "S607", # starting a process with a partial executable path
+]
+
+[tool.ruff.pydocstyle]
+convention = "numpy"
