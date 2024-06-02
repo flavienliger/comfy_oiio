@@ -23,7 +23,7 @@ mkdir $build_root
 
 # NOTE: install zlib
 cd $build_root
-clone_or_update "./zlib" https://github.com/madler/zlib
+clone-or-update "./zlib" https://github.com/madler/zlib
 cd zlib
 
 if $reset {
@@ -44,7 +44,7 @@ cmake --build build --config Release --target install
 
 # NOTE: Install libTiff
 cd $build_root
-clone_or_update "./libtiff"  https://gitlab.com/libtiff/libtiff.git
+clone-or-update "./libtiff"  https://gitlab.com/libtiff/libtiff.git
 cd libtiff
 if $reset {
     try {
@@ -59,7 +59,7 @@ cmake --build build --config Release --target install
 
 # NOTE: install libjpeg-turbo
 cd $build_root
-clone_or_update "./libjpeg-turbo" https://github.com/libjpeg-turbo/libjpeg-turbo  
+clone-or-update "./libjpeg-turbo" https://github.com/libjpeg-turbo/libjpeg-turbo  
 cd libjpeg-turbo
 if $reset {
     rm -rf build
@@ -69,7 +69,7 @@ cmake --build build --config Release --target install
 
 # NOTE: install openexr
 cd $build_root
-clone_or_update "./openexr" https://github.com/AcademySoftwareFoundation/openexr
+clone-or-update "./openexr" https://github.com/AcademySoftwareFoundation/openexr
 cd openexr
 if $reset {
     rm -rf build
@@ -80,7 +80,7 @@ let imath_lib = (glob dist/lib/Imath*.lib | get -i 0)
 
 # NOTE: install pybind
 cd $build_root 
-clone_or_update "./pybind11" https://github.com/pybind/pybind11
+clone-or-update "./pybind11" https://github.com/pybind/pybind11
 cd pybind11
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=OFF -DPYBIND11_TEST=OFF -DCMAKE_INSTALL_PREFIX=.
 cmake --build build --config Release --target install 

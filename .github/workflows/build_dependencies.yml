@@ -7,6 +7,7 @@ on:
     paths:
       - "pyproject.toml"
       - ".github/workflows/build_dependencies.yml"
+      - "scripts/build_oiio.nu"
 jobs:
   build:
     permissions:
