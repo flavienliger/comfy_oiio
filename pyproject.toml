@@ -2,6 +2,7 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
+
 [project]
 name = "comfy-oiio"
 dynamic = ["version"]
@@ -9,9 +10,8 @@ description = "OpenImageIO plugin for ComfyUI"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 readme = "README.md"
-# repository = "https://github.com/melMass/comfy_oiio"
-dependencies = ["opencolorio"]
-optional-dependencies = { test = ["pytest", "pytest-cov", "tox"] }
+# repository = "https://github.com/melMass/Comfy-OIIO"
+dependencies = ["opencolorio>=3.0.3.1"]
 authors = [{ name = "Mel Massadian" }]
 classifiers = [
   "License :: OSI Approved :: MIT License",
@@ -22,6 +22,11 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Intended Audience :: Developers",
 ]
+
+[dependency-groups]
+dev = ["marimo"]
+test = ["pytest", "pytest-cov", "nox"]
+
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -40,10 +45,24 @@ pythonVersion = "3.10"
 
 [tool.ruff]
 line-length = 100
-select = ["A", "B", "C", "D", "E", "F", "FBT", "I", "N", "S", "SIM", "UP", "W"]
-extend-exclude = ["./docs/conf.py"]                                             # exclude auto generated file
+lint.select = [
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F",
+  "FBT",
+  "I",
+  "N",
+  "S",
+  "SIM",
+  "UP",
+  "W",
+]
+extend-exclude = ["./docs/conf.py"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"] # imported but unused
 "tests/*" = ["S101"] # use of assert detected
 "scripts/*" = [
@@ -52,5 +71,5 @@ extend-exclude = ["./docs/conf.py"]                                             
   "S607", # starting a process with a partial executable path
 ]
 
-[tool.ruff.pydocstyle]
+[tool.ruff.lint.pydocstyle]
 convention = "numpy"
