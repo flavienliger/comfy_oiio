@@ -8,11 +8,11 @@ version = "0.1.0"
 # dynamic = ["version"]
 description = "OpenImageIO plugin for ComfyUI"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 readme = "README.md"
 # repository = "https://github.com/melMass/Comfy-OIIO"
 dependencies = ["opencolorio>=3.0.3.1"]
-authors = [{ name = "Mel Massadian" }]
+authors = [{ name = "Mel Massadian", email = "mel@melmassadian.com" }]
 classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
