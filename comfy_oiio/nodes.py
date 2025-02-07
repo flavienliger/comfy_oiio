@@ -9,7 +9,6 @@ DEFAULT_INPUT_TRANSFORM = "scene_linear"
 DEFAULT_OUTPUT_TRANSFORM = "sRGB"
 
 # TODO: Add support for sublayers / arbitrary channels
-# TODO: Support custom OCIO config
 # TODO: Support Display/View transforms? (probably not easy to adapt to comfy)
 # TODO: Better error handling
 
@@ -81,10 +80,8 @@ class OIIO_ColorspaceConvert:
         ]
         colorspaces = []
         try:
-            buf = oiio.ImageBuf()
-            colorconfig = buf.colorconfig()
-            if colorconfig:
-                colorspaces = colorconfig.getColorSpaceNames()
+            config = oiio.ColorConfig()
+            colorspaces = config.getColorSpaceNames()
         except Exception as e:
             print(f"Warning: Could not get colorspaces: {e}")
 
