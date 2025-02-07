@@ -1,5 +1,7 @@
 import os
+from pathlib import Path
 
+import folder_paths
 import OpenImageIO as oiio
 import torch
 from OpenImageIO import ImageBuf, ImageBufAlgo, ImageInput, ImageOutput, ImageSpec
@@ -28,8 +30,8 @@ class OIIO_LoadImage:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT")
-    RETURN_NAMES = ("pixels", "xres", "yres")
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")
+    RETURN_NAMES = ("pixels", "mask", "xres", "yres")
     FUNCTION = "read"
     CATEGORY = "oiio"
 
@@ -37,7 +39,6 @@ class OIIO_LoadImage:
         img = ImageInput.open(path)
         if img:
             spec = img.spec()
-
             spec.attribute("oiio:ColorSpace", input_transform)
 
             precision = spec.format if precision == "auto" else precision
@@ -46,9 +47,10 @@ class OIIO_LoadImage:
             nchannels = spec.nchannels
 
             pixels = img.read_image(0, 0, 0, nchannels, precision)
-
             img.close()
-            pixels_tensor = torch.from_numpy(pixels)
+
+            rgb = pixels[:, :, :3] if nchannels > 3 else pixels
+            pixels_tensor = torch.from_numpy(rgb)
 
             if pixels_tensor.dtype == torch.uint8:
                 pixels_tensor = pixels_tensor.float() / 255.0
@@ -56,9 +58,18 @@ class OIIO_LoadImage:
             if pixels_tensor.dim() == 3:
                 pixels_tensor = pixels_tensor.unsqueeze(0)
 
-            return (pixels_tensor, xres, yres)
+            if nchannels > 3:
+                mask_tensor = torch.from_numpy(pixels[:, :, 3]).float()
+                if mask_tensor.dtype == torch.uint8:
+                    mask_tensor = mask_tensor / 255.0
+            else:
+                mask_tensor = torch.ones((yres, xres), dtype=torch.float32)
 
-        return (None, 0, 0)
+            mask_tensor = mask_tensor.unsqueeze(0)
+
+            return (pixels_tensor, mask_tensor, xres, yres)
+
+        return (None, None, 0, 0)
 
 
 class OIIO_ColorspaceConvert:
@@ -141,21 +152,55 @@ class OIIO_SaveImage:
                     colorspaces,
                     {"default": DEFAULT_OUTPUT_TRANSFORM},
                 ),
+                "frame_start": ("INT", {"default": 1, "min": 0, "max": 999999}),
+                "frame_pad": ("INT", {"default": 4, "min": 1, "max": 8}),
                 "dwa_compression_level": ("FLOAT", {"default": 45.0, "min": 10.0, "max": 250.0}),
-            }
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
 
     RETURN_TYPES = ()
     FUNCTION = "write"
     CATEGORY = "oiio"
     EXPERIMENTAL = True
+    OUTPUT_NODE = True
 
-    def write(self, images, path, precision, compression, colorspace, dwa_compression_level):
+    def write(
+        self,
+        images,
+        path,
+        precision,
+        compression,
+        colorspace,
+        frame_start,
+        frame_pad,
+        dwa_compression_level,
+        prompt=None,
+        extra_pnginfo=None,
+    ):
         base, ext = os.path.splitext(path)
+        _path = Path(path)
+        counter = 0
+        if _path.is_absolute():
+            output_dir = _path.parent
+            filename = _path.stem
+            output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            c_out = folder_paths.get_output_directory()
+            output_dir, filename, counter, subfolder, filename_prefix = (
+                folder_paths.get_save_image_path(path, c_out, images.shape[2], images.shape[1])
+            )
+            output_dir = Path(output_dir)
 
         for i in range(images.shape[0]):
-            # TODO: this isn't great as it would easily clash...
-            output_path = path if images.shape[0] == 1 else f"{base}_{i:04d}{ext}"
+            if _path.is_absolute():
+                frame_num = frame_start + i
+                output_path = output_dir / f"{filename}.{frame_num:0{frame_pad}d}.exr"
+            else:
+                output_path = output_dir / f"{filename}_{counter + i:0{frame_pad}d}.exr"
 
             pixels = images[i].cpu().numpy()
 
@@ -173,10 +218,10 @@ class OIIO_SaveImage:
             elif pixels.shape[2] == 4:
                 spec.channelnames = ("R", "G", "B", "A")
 
-            out = ImageOutput.create(output_path)
+            out = ImageOutput.create(str(output_path))
             if out:
                 try:
-                    out.open(output_path, spec)
+                    out.open(str(output_path), spec)
                     out.write_image(pixels)
                 finally:
                     out.close()
