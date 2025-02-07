@@ -2,7 +2,6 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
-
 [project]
 name = "comfy-oiio"
 dynamic = ["version"]
@@ -22,6 +21,11 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Intended Audience :: Developers",
 ]
+
+[tool.comfy]
+PublisherId = "mel"
+DisplayName = "OpenImageIO for Comfy"
+Icon = "https://avatars.githubusercontent.com/u/7041726?v=4"
 
 [dependency-groups]
 dev = ["marimo"]
