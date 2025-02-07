@@ -1,13 +1,7 @@
 name: "Build dependencies"
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "pyproject.toml"
-      - ".github/workflows/build_dependencies.yml"
-      - "scripts/build_oiio.nu"
+
 jobs:
   build:
     permissions:
