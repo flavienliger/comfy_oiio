@@ -20,7 +20,7 @@ class OIIO_LoadImage:
         colorspaces = OIIO_ColorspaceConvert.get_colorspaces()
         return {
             "required": {
-                "path": ("STRING", {"default": ""}),
+                "filepath": ("STRING", {"default": ""}),
                 "precision": (["auto", "uint8", "half", "float"], {"default": "auto"}),
                 "input_transform": (
                     colorspaces,
@@ -30,12 +30,12 @@ class OIIO_LoadImage:
         }
 
     RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")
-    RETURN_NAMES = ("pixels", "mask", "xres", "yres")
+    RETURN_NAMES = ("image", "mask", "xres", "yres")
     FUNCTION = "read"
     CATEGORY = "oiio"
 
-    def read(self, path, precision, input_transform):
-        img = ImageInput.open(path)
+    def read(self, filepath, precision, input_transform):
+        img = ImageInput.open(filepath)
         if img:
             spec = img.spec()
             if input_transform != "auto":
@@ -143,7 +143,7 @@ class OIIO_SaveImage:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "path": ("STRING", {"default": "output.exr"}),
+                "filepath": ("STRING", {"default": "output.exr"}),
                 "precision": (["half", "float"], {"default": "half"}),
                 "compression": (
                     ["none", "zip", "zips", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab"],
@@ -172,7 +172,7 @@ class OIIO_SaveImage:
     def write(
         self,
         images,
-        path,
+        filepath,
         precision,
         compression,
         colorspace,
@@ -182,7 +182,7 @@ class OIIO_SaveImage:
         prompt=None,
         extra_pnginfo=None,
     ):
-        _path = Path(path)
+        _path = Path(filepath)
         counter = 0
         if _path.is_absolute():
             output_dir = _path.parent
@@ -191,7 +191,7 @@ class OIIO_SaveImage:
         else:
             c_out = folder_paths.get_output_directory()
             output_dir, filename, counter, subfolder, filename_prefix = (
-                folder_paths.get_save_image_path(path, c_out, images.shape[2], images.shape[1])
+                folder_paths.get_save_image_path(filepath, c_out, images.shape[2], images.shape[1])
             )
             output_dir = Path(output_dir)
 
