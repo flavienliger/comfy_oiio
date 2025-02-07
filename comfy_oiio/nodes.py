@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import folder_paths
@@ -25,7 +24,7 @@ class OIIO_LoadImage:
                 "precision": (["auto", "uint8", "half", "float"], {"default": "auto"}),
                 "input_transform": (
                     colorspaces,
-                    {"default": DEFAULT_INPUT_TRANSFORM},
+                    {"default": "auto"},
                 ),
             }
         }
@@ -39,7 +38,8 @@ class OIIO_LoadImage:
         img = ImageInput.open(path)
         if img:
             spec = img.spec()
-            spec.attribute("oiio:ColorSpace", input_transform)
+            if input_transform != "auto":
+                spec.attribute("oiio:ColorSpace", input_transform)
 
             precision = spec.format if precision == "auto" else precision
             xres = spec.width
@@ -75,7 +75,7 @@ class OIIO_LoadImage:
 class OIIO_ColorspaceConvert:
     @classmethod
     def get_colorspaces(cls):
-        fallback = [
+        common = [
             "scene_linear",
             "lin_srgb",
             "lin_rec709",
@@ -96,14 +96,14 @@ class OIIO_ColorspaceConvert:
         except Exception as e:
             print(f"Warning: Could not get colorspaces: {e}")
 
-        return colorspaces if colorspaces else fallback
+        return ["auto"] + common + colorspaces
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "input_colorspace": (cls.get_colorspaces(), {"default": DEFAULT_INPUT_TRANSFORM}),
+                "input_colorspace": (cls.get_colorspaces(), {"default": "sRGB"}),
                 "output_colorspace": (cls.get_colorspaces(), {"default": DEFAULT_OUTPUT_TRANSFORM}),
             }
         }
@@ -115,7 +115,8 @@ class OIIO_ColorspaceConvert:
     def convert(self, image, input_colorspace, output_colorspace):
         pixels = image.squeeze(0).cpu().numpy()
         spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
-        spec.attribute("oiio:ColorSpace", input_colorspace)
+        if input_colorspace != "auto":
+            spec.attribute("oiio:ColorSpace", input_colorspace)
 
         in_buf = ImageBuf(spec)
         in_buf.set_pixels(ROI(), pixels)
@@ -150,7 +151,7 @@ class OIIO_SaveImage:
                 ),
                 "colorspace": (
                     colorspaces,
-                    {"default": DEFAULT_OUTPUT_TRANSFORM},
+                    {"default": "auto"},
                 ),
                 "frame_start": ("INT", {"default": 1, "min": 0, "max": 999999}),
                 "frame_pad": ("INT", {"default": 4, "min": 1, "max": 8}),
@@ -181,7 +182,6 @@ class OIIO_SaveImage:
         prompt=None,
         extra_pnginfo=None,
     ):
-        base, ext = os.path.splitext(path)
         _path = Path(path)
         counter = 0
         if _path.is_absolute():
@@ -209,7 +209,8 @@ class OIIO_SaveImage:
             if compression in ["dwaa", "dwab"]:
                 spec.attribute("compressionlevel", dwa_compression_level)
 
-            spec.set_colorspace(colorspace)
+            if colorspace != "auto":
+                spec.set_colorspace(colorspace)
 
             if pixels.shape[2] == 1:
                 spec.channelnames = ("A",)
