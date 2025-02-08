@@ -1,3 +1,4 @@
+import json
 from logging import getLogger
 from pathlib import Path
 
@@ -188,7 +189,7 @@ class OIIO_SaveImage:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "filepath": ("STRING", {"default": "output.exr"}),
+                "filename_prefix": ("STRING", {"default": "output.exr"}),
                 "precision": (["half", "float"], {"default": "half"}),
                 "compression": (
                     ["none", "zip", "zips", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab"],
@@ -208,7 +209,8 @@ class OIIO_SaveImage:
             },
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("filename",)
     FUNCTION = "write"
     CATEGORY = "oiio"
     EXPERIMENTAL = True
@@ -217,7 +219,7 @@ class OIIO_SaveImage:
     def write(
         self,
         images,
-        filepath,
+        filename_prefix,
         precision,
         compression,
         colorspace,
@@ -227,27 +229,79 @@ class OIIO_SaveImage:
         prompt=None,
         extra_pnginfo=None,
     ):
-        _path = Path(filepath)
+        log.debug(
+            f"Starting save with prefix: {filename_prefix}, precision: {precision}, colorspace: {colorspace}"
+        )
+        log.debug(f"Input tensor shape: {images.shape}, dtype: {images.dtype}")
+
+        path = Path(filename_prefix)
         counter = 0
-        if _path.is_absolute():
-            output_dir = _path.parent
-            filename = _path.stem
+        if path.is_absolute():
+            output_dir = path.parent
+            filename = path.stem
             output_dir.mkdir(parents=True, exist_ok=True)
+            log.debug(f"Using absolute path. Output dir: {output_dir}, filename: {filename}")
         else:
             c_out = folder_paths.get_output_directory()
+
+            log.debug(f"Using Comfy output dir: {c_out}")
+            stem_path = str(path).replace(path.suffix, "")
+            log.debug(f"Path stem for get_save_image_path: {stem_path}")
+
             output_dir, filename, counter, subfolder, filename_prefix = (
-                folder_paths.get_save_image_path(filepath, c_out, images.shape[2], images.shape[1])
+                folder_paths.get_save_image_path(stem_path, c_out, images.shape[2], images.shape[1])
             )
+            log.debug(
+                f"Got path components: dir={output_dir}, name={filename}, counter={counter}, subfolder={subfolder}"
+            )
+
             output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
+        extension = path.suffix.lstrip(".")
+        log.debug(f"Using extension: {extension}")
+        last_path = None
         for i in range(images.shape[0]):
-            if _path.is_absolute():
+            if path.is_absolute():
                 frame_num = frame_start + i
-                output_path = output_dir / f"{filename}.{frame_num:0{frame_pad}d}.exr"
+                output_path = output_dir / f"{filename}.{frame_num:0{frame_pad}d}.{extension}"
             else:
-                output_path = output_dir / f"{filename}_{counter + i:0{frame_pad}d}.exr"
+                output_path = output_dir / f"{filename}_{counter + i:0{frame_pad}d}.{extension}"
 
-            pixels = images[i].cpu().numpy()
+            log.debug(f"Processing frame {i}, output path: {output_path}")
+
+            if i < 1:
+                if prompt is not None:
+                    prompt_path = output_path.with_stem(output_path.stem + "_api").with_suffix(
+                        ".json"
+                    )
+                    log.debug(f"Writing prompt to: {prompt_path}")
+                    with prompt_path.open("w") as f:
+                        f.write(json.dumps(prompt, indent=2))
+                if extra_pnginfo is not None:
+                    info_path = output_path.with_stem(output_path.stem + "_ui").with_suffix(".json")
+                    log.debug(f"Writing extra info to: {info_path}")
+                    with info_path.open("w") as f:
+                        for x in extra_pnginfo:
+                            f.write(json.dumps(extra_pnginfo[x], indent=2))
+
+            if precision == "float":
+                pixels = images[i].float()
+            elif precision == "half":
+                pixels = images[i].half()
+            else:
+                pixels = images[i]
+
+            log.debug(
+                f"Tensor after precision conversion: dtype={pixels.dtype}, range=[{pixels.min().item():.6f}, {pixels.max().item():.6f}]"
+            )
+
+            pixels = pixels.cpu().numpy()
+            pixels = np.ascontiguousarray(pixels)
+            log.debug(
+                f"Converted to numpy: shape={pixels.shape}, dtype={pixels.dtype}, range=[{pixels.min():.6f}, {pixels.max():.6f}]"
+            )
+            log.debug(f"Array flags: {pixels.flags}")
 
             spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], precision)
             spec.attribute("compression", compression)
@@ -264,15 +318,44 @@ class OIIO_SaveImage:
             elif pixels.shape[2] == 4:
                 spec.channelnames = ("R", "G", "B", "A")
 
-            out = ImageOutput.create(str(output_path))
+            log.debug(
+                f"Image spec: {spec.width}x{spec.height}, {spec.nchannels} channels, format={spec.format}"
+            )
+
+            out = oiio.ImageOutput.create(str(output_path))
             if out:
                 try:
-                    out.open(str(output_path), spec)
-                    out.write_image(pixels)
+                    log.debug(f"Opening file for writing: format={out.format_name()}")
+                    success = out.open(str(output_path), spec)
+                    if not success:
+                        log.error(f"Failed to open file: {out.geterror()}")
+                        continue
+
+                    log.debug(
+                        f"Pixel stats before write: shape={pixels.shape}, dtype={pixels.dtype}"
+                    )
+                    log.debug(
+                        f"Pixel values - min={pixels.min():.6f}, max={pixels.max():.6f}, mean={pixels.mean():.6f}"
+                    )
+                    log.debug(
+                        f"Unique values in first 1000: {np.unique(pixels.flatten()[:1000]).size}"
+                    )
+
+                    success = out.write_image(pixels)
+                    if not success:
+                        log.error(f"Failed to write image: {out.geterror()}")
+
+                    log.debug(f"Successfully wrote image to: {output_path}")
+                except Exception as e:
+                    log.error(f"Failed to write image: {e}")
                 finally:
                     out.close()
+            else:
+                log.error(f"Failed to create ImageOutput for: {output_path} {oiio.geterror()}")
+            last_path = output_path
 
-        return ()
+        log.debug(f"Save completed. Last path: {last_path}")
+        return (str(last_path),)
 
 
 NODE_CLASS_MAPPINGS = {
