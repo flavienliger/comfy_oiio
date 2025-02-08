@@ -1,10 +1,14 @@
+from logging import getLogger
 from pathlib import Path
 
 import folder_paths
+import numpy as np
 import OpenImageIO as oiio
 import torch
-from OpenImageIO import ImageBuf, ImageBufAlgo, ImageInput, ImageOutput, ImageSpec
+from OpenImageIO import ImageSpec
 from OpenImageIO.OpenImageIO import ROI
+
+log = getLogger("comfy-oiio")
 
 DEFAULT_INPUT_TRANSFORM = "scene_linear"
 DEFAULT_OUTPUT_TRANSFORM = "sRGB"
@@ -35,7 +39,48 @@ class OIIO_LoadImage:
     CATEGORY = "oiio"
 
     def read(self, filepath, precision, input_transform):
-        img = ImageInput.open(filepath)
+        path = Path(filepath)
+
+        if path.is_dir():
+            pixels_list = []
+            masks_list = []
+            xres = yres = None
+            for f in sorted(path.iterdir()):
+                try:
+                    result = self.read_single(f, precision, input_transform)
+                    if result is None:
+                        continue
+
+                    # use the first match as reference for dimensions
+                    if xres is None:
+                        xres = result[2]
+                        yres = result[3]
+                    elif (result[2], result[3]) != (xres, yres):
+                        print(f"Warning: Skipping {f}, dimensions don't match")
+                        continue
+
+                    pixels_list.append(result[0])
+                    masks_list.append(result[1])
+
+                except Exception as e:
+                    print(f"Warning: Couldn't read {f}: {e}")
+                    continue
+
+            if not pixels_list:
+                raise ValueError(f"No readable images found in {filepath}")
+
+            # stack
+            pixels_tensor = torch.cat(pixels_list, dim=0)
+            mask_tensor = torch.cat(masks_list, dim=0)
+
+            return (pixels_tensor, mask_tensor, xres, yres)
+
+        else:
+            return self.read_single(path, precision, input_transform)
+
+    def read_single(self, filepath, precision, input_transform):
+        """Read a single image file."""
+        img = oiio.ImageInput.open(str(filepath))
         if img:
             spec = img.spec()
             if input_transform != "auto":
@@ -69,7 +114,7 @@ class OIIO_LoadImage:
 
             return (pixels_tensor, mask_tensor, xres, yres)
 
-        return (None, None, 0, 0)
+        return None
 
 
 class OIIO_ColorspaceConvert:
@@ -114,11 +159,11 @@ class OIIO_ColorspaceConvert:
 
     def convert(self, image, input_colorspace, output_colorspace):
         pixels = image.squeeze(0).cpu().numpy()
-        spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
+        spec = oiio.ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
         if input_colorspace != "auto":
             spec.attribute("oiio:ColorSpace", input_colorspace)
 
-        in_buf = ImageBuf(spec)
+        in_buf = oiio.ImageBuf(spec)
         in_buf.set_pixels(ROI(), pixels)
 
         out_spec = oiio.ImageSpec(spec)
@@ -129,7 +174,7 @@ class OIIO_ColorspaceConvert:
         # buf.copy_pixels(pixels)
         # buf.specmod().attribute("oiio:ColorSpace", input_colorspace)
 
-        ImageBufAlgo.colorconvert(out_buf, in_buf, input_colorspace, output_colorspace)
+        oiio.ImageBufAlgo.colorconvert(out_buf, in_buf, input_colorspace, output_colorspace)
 
         result = torch.from_numpy(out_buf.get_pixels()).unsqueeze(0)
 
