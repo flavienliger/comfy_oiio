@@ -1,13 +1,17 @@
+import gc
+import heapq
+import itertools
 import json
+from collections import Counter
 from logging import getLogger
 from pathlib import Path
+from typing import Any
 
 import folder_paths
 import numpy as np
 import OpenImageIO as oiio
 import torch
 from OpenImageIO import ImageSpec
-from OpenImageIO.OpenImageIO import ROI
 
 log = getLogger("comfy-oiio")
 
@@ -17,6 +21,96 @@ DEFAULT_OUTPUT_TRANSFORM = "sRGB"
 # TODO: Add support for sublayers / arbitrary channels
 # TODO: Support Display/View transforms? (probably not easy to adapt to comfy)
 # TODO: Better error handling
+
+
+class OIIOUtils:
+    @staticmethod
+    def comfy_to_oiio(tensor: torch.Tensor) -> tuple[oiio.ImageBuf, oiio.ROI]:
+        """Convert a Comfy tensor to OIIO ImageBuf and ROI
+
+        Args:
+            tensor: [B,H,W,C] torch tensor
+        Returns:
+            buf: OIIO ImageBuf
+            roi: OIIO ROI
+        """
+        pixels = tensor.float()
+
+        if pixels.dim() == 4:
+            pixels = pixels.squeeze(0)
+
+        pixels = pixels.cpu().numpy()
+        pixels = np.ascontiguousarray(pixels)
+
+        spec = oiio.ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
+        roi = oiio.ROI(0, pixels.shape[1], 0, pixels.shape[0], 0, 1, 0, pixels.shape[2])
+
+        buf = oiio.ImageBuf(spec)
+        buf.set_pixels(roi, pixels)
+
+        return buf, roi
+
+    @staticmethod
+    def oiio_to_comfy(buf: oiio.ImageBuf, roi: oiio.ROI, add_batch: bool = True) -> torch.Tensor:
+        """Convert OIIO ImageBuf back to Comfy tensor
+
+        Args:
+            buf: OIIO ImageBuf
+            roi: OIIO ROI
+            add_batch: Whether to add batch dimension
+        Returns:
+            torch tensor in Comfy format [B,H,W,C] or [H,W,C]
+        """
+        pixels = torch.from_numpy(buf.get_pixels(roi=roi))
+
+        if add_batch:
+            pixels = pixels.unsqueeze(0)
+
+        return pixels
+
+    @staticmethod
+    def convert_colorspace(
+        buf: oiio.ImageBuf, from_colorspace: str, to_colorspace: str, roi: oiio.ROI | None = None
+    ) -> oiio.ImageBuf:
+        """Convert ImageBuf between colorspaces
+
+        Args:
+            buf: Input ImageBuf
+            from_colorspace: Source colorspace
+            to_colorspace: Target colorspace
+            roi: Optional ROI (will use buf's ROI if None)
+
+        Returns
+        -------
+            Converted ImageBuf
+        Raises:
+            RuntimeError if conversion fails
+        """
+        if from_colorspace == "auto" or to_colorspace == "auto" or from_colorspace == to_colorspace:
+            return buf
+
+        out_buf = oiio.ImageBuf(buf.spec())
+
+        if not oiio.ImageBufAlgo.colorconvert(out_buf, buf, from_colorspace, to_colorspace):
+            raise RuntimeError(f"Color conversion failed: {out_buf.geterror()}")
+
+        return out_buf
+
+    @staticmethod
+    def get_image_stats(tensor: torch.Tensor) -> str:
+        """Get debug string with image statistics
+
+        Args:
+            tensor: Input tensor
+        Returns:
+            Formatted string with stats
+        """
+        return (
+            f"Shape: {tensor.shape}, "
+            f"dtype: {tensor.dtype}, "
+            f"range: [{tensor.min().item():.6f}, {tensor.max().item():.6f}], "
+            f"mean: {tensor.mean().item():.6f}"
+        )
 
 
 class OIIO_LoadImage:
@@ -39,7 +133,7 @@ class OIIO_LoadImage:
     FUNCTION = "read"
     CATEGORY = "oiio"
 
-    def read(self, filepath, precision, input_transform):
+    def read(self, filepath="", precision="auto", input_transform="auto"):
         path = Path(filepath)
 
         if path.is_dir():
@@ -57,14 +151,14 @@ class OIIO_LoadImage:
                         xres = result[2]
                         yres = result[3]
                     elif (result[2], result[3]) != (xres, yres):
-                        print(f"Warning: Skipping {f}, dimensions don't match")
+                        log.warning(f"Warning: Skipping {f}, dimensions don't match")
                         continue
 
                     pixels_list.append(result[0])
                     masks_list.append(result[1])
 
                 except Exception as e:
-                    print(f"Warning: Couldn't read {f}: {e}")
+                    log.error(f"Warning: Couldn't read {f}: {e}")
                     continue
 
             if not pixels_list:
@@ -84,16 +178,40 @@ class OIIO_LoadImage:
         img = oiio.ImageInput.open(str(filepath))
         if img:
             spec = img.spec()
-            if input_transform != "auto":
-                spec.attribute("oiio:ColorSpace", input_transform)
-
-            precision = spec.format if precision == "auto" else precision
             xres = spec.width
             yres = spec.height
             nchannels = spec.nchannels
 
-            pixels = img.read_image(0, 0, 0, nchannels, precision)
+            if precision == "auto":
+                read_type = spec.format
+            else:
+                type_map = {"uint8": oiio.UINT8, "half": oiio.HALF, "float": oiio.FLOAT}
+                read_type = type_map.get(precision, spec.format)
+
+            pixels = img.read_image(read_type)
             img.close()
+
+            if input_transform != "auto":
+                in_spec = oiio.ImageSpec(xres, yres, nchannels, oiio.FLOAT)
+                roi = oiio.ROI(0, xres, 0, yres, 0, 1, 0, nchannels)
+
+                in_buf = oiio.ImageBuf(in_spec)
+                in_buf.set_pixels(roi, pixels)
+
+                out_buf = oiio.ImageBuf(in_spec)
+
+                if not oiio.ImageBufAlgo.colorconvert(
+                    out_buf,
+                    in_buf,
+                    spec.get_string_attribute("oiio:ColorSpace", "sRGB"),
+                    input_transform,
+                ):
+                    raise RuntimeError(f"Color conversion failed: {out_buf.geterror()}")
+
+                pixels = out_buf.get_pixels()
+
+            if precision not in ("float", "auto"):
+                pixels = pixels.astype(precision)
 
             rgb = pixels[:, :, :3] if nchannels > 3 else pixels
             pixels_tensor = torch.from_numpy(rgb)
@@ -114,6 +232,8 @@ class OIIO_LoadImage:
             mask_tensor = mask_tensor.unsqueeze(0)
 
             return (pixels_tensor, mask_tensor, xres, yres)
+        else:
+            log.error(f"Warning: Couldn't open {filepath}: {oiio.geterror()}")
 
         return None
 
@@ -158,28 +278,34 @@ class OIIO_ColorspaceConvert:
     FUNCTION = "convert"
     CATEGORY = "oiio"
 
-    def convert(self, image, input_colorspace, output_colorspace):
-        pixels = image.squeeze(0).cpu().numpy()
-        spec = oiio.ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
-        if input_colorspace != "auto":
-            spec.attribute("oiio:ColorSpace", input_colorspace)
+    def convert(self, image, input_colorspace="sRGB", output_colorspace=DEFAULT_OUTPUT_TRANSFORM):
+        if input_colorspace == output_colorspace:
+            return (image,)
 
-        in_buf = oiio.ImageBuf(spec)
-        in_buf.set_pixels(ROI(), pixels)
+        pixels = image.squeeze(0).float().cpu().numpy()
+        pixels = np.ascontiguousarray(pixels)
 
-        out_spec = oiio.ImageSpec(spec)
-        out_spec.attribute("oiio:ColorSpace", output_colorspace)
-        out_buf = oiio.ImageBuf(out_spec)
+        # input buffer
+        in_spec = oiio.ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
+        roi = oiio.ROI(0, pixels.shape[1], 0, pixels.shape[0], 0, 1, 0, pixels.shape[2])
+        in_buf = oiio.ImageBuf(in_spec)
+        in_buf.set_pixels(roi, pixels)
 
-        # buf.set_write_format(oiio.FLOAT)
-        # buf.copy_pixels(pixels)
-        # buf.specmod().attribute("oiio:ColorSpace", input_colorspace)
+        # output buffer
+        out_buf = oiio.ImageBuf(in_spec)
 
-        oiio.ImageBufAlgo.colorconvert(out_buf, in_buf, input_colorspace, output_colorspace)
+        if not oiio.ImageBufAlgo.colorconvert(out_buf, in_buf, input_colorspace, output_colorspace):
+            raise RuntimeError(f"Color conversion failed: {out_buf.geterror()}")
 
-        result = torch.from_numpy(out_buf.get_pixels()).unsqueeze(0)
+        result = torch.from_numpy(out_buf.get_pixels(roi=roi))
+        log.info(f"Conversion stats - Input range: [{pixels.min():.3f}, {pixels.max():.3f}]")
+        log.info(f"Conversion stats - Output range: [{result.min():.3f}, {result.max():.3f}]")
+
+        if result.dim() == 3:
+            result = result.unsqueeze(0)
 
         return (result,)
+
 
 
 class OIIO_SaveImage:
@@ -195,13 +321,18 @@ class OIIO_SaveImage:
                     ["none", "zip", "zips", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab"],
                     {"default": "zip"},
                 ),
-                "colorspace": (
+                "input_colorspace": (
                     colorspaces,
-                    {"default": "auto"},
+                    {"default": "sRGB"},
+                ),
+                "output_colorspace": (
+                    colorspaces,
+                    {"default": "scene_linear"},
                 ),
                 "frame_start": ("INT", {"default": 1, "min": 0, "max": 999999}),
                 "frame_pad": ("INT", {"default": 4, "min": 1, "max": 8}),
                 "dwa_compression_level": ("FLOAT", {"default": 45.0, "min": 10.0, "max": 250.0}),
+                "save_preview": ("BOOLEAN", {"default": True}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -219,20 +350,27 @@ class OIIO_SaveImage:
     def write(
         self,
         images,
-        filename_prefix,
-        precision,
-        compression,
-        colorspace,
-        frame_start,
-        frame_pad,
-        dwa_compression_level,
+        filename_prefix="output.exr",
+        precision="half",
+        compression="zip",
+        input_colorspace="sRGB",
+        output_colorspace="scene_linear",
+        frame_start=1,
+        frame_pad=4,
+        dwa_compression_level=45.0,
+        save_preview=True,
         prompt=None,
         extra_pnginfo=None,
     ):
+        images = images.float()
         log.debug(
-            f"Starting save with prefix: {filename_prefix}, precision: {precision}, colorspace: {colorspace}"
+            f"Starting save with prefix: {filename_prefix}, precision: {precision}, colorspace: {input_colorspace} -> {output_colorspace}"
         )
         log.debug(f"Input tensor shape: {images.shape}, dtype: {images.dtype}")
+
+        max_val = images.max().item()
+        min_val = images.min().item()
+        log.debug(f"Input tensor range: [{min_val:.6f}, {max_val:.6f}]")
 
         path = Path(filename_prefix)
         counter = 0
@@ -303,13 +441,37 @@ class OIIO_SaveImage:
             )
             log.debug(f"Array flags: {pixels.flags}")
 
+            if (
+                input_colorspace != "auto"
+                and output_colorspace != "auto"
+                and input_colorspace != output_colorspace
+            ):
+                in_spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
+                in_spec.attribute("oiio:ColorSpace", input_colorspace)
+                in_buf = oiio.ImageBuf(in_spec)
+                in_buf.set_pixels(
+                    oiio.ROI(0, pixels.shape[1], 0, pixels.shape[0], 0, 1, 0, pixels.shape[2]),
+                    pixels,
+                )
+
+                out_spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT)
+                out_spec.attribute("oiio:ColorSpace", output_colorspace)
+                out_buf = oiio.ImageBuf(out_spec)
+
+                if not oiio.ImageBufAlgo.colorconvert(
+                    out_buf, in_buf, input_colorspace, output_colorspace
+                ):
+                    log.error(f"Color conversion failed: {out_buf.geterror()}")
+                else:
+                    pixels = out_buf.get_pixels()
+
             spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], precision)
             spec.attribute("compression", compression)
             if compression in ["dwaa", "dwab"]:
                 spec.attribute("compressionlevel", dwa_compression_level)
 
-            if colorspace != "auto":
-                spec.set_colorspace(colorspace)
+            if output_colorspace != "auto":
+                spec.set_colorspace(output_colorspace)
 
             if pixels.shape[2] == 1:
                 spec.channelnames = ("A",)
@@ -352,19 +514,229 @@ class OIIO_SaveImage:
                     out.close()
             else:
                 log.error(f"Failed to create ImageOutput for: {output_path} {oiio.geterror()}")
+            if i == 0 and save_preview:
+                preview_path = output_path.with_suffix(".preview.png")
+                preview_spec = ImageSpec(pixels.shape[1], pixels.shape[0], pixels.shape[2], "uint8")
+                preview_spec.attribute("oiio:ColorSpace", "sRGB")
+
+                preview_out = oiio.ImageOutput.create(str(preview_path))
+                if preview_out:
+                    try:
+                        preview_out.open(str(preview_path), preview_spec)
+                        preview_pixels = pixels
+                        if output_colorspace != "sRGB":
+                            in_spec = ImageSpec(
+                                pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT
+                            )
+                            in_spec.attribute("oiio:ColorSpace", input_colorspace)
+                            in_buf = oiio.ImageBuf(in_spec)
+                            in_buf.set_pixels(
+                                oiio.ROI(
+                                    0, pixels.shape[1], 0, pixels.shape[0], 0, 1, 0, pixels.shape[2]
+                                ),
+                                pixels,
+                            )
+
+                            out_spec = ImageSpec(
+                                pixels.shape[1], pixels.shape[0], pixels.shape[2], oiio.FLOAT
+                            )
+                            out_spec.attribute("oiio:ColorSpace", "sRGB")
+                            out_buf = oiio.ImageBuf(out_spec)
+
+                            oiio.ImageBufAlgo.colorconvert(
+                                out_buf, in_buf, output_colorspace, "sRGB"
+                            )
+                            preview_pixels = out_buf.get_pixels()
+
+                        preview_pixels = np.clip(preview_pixels * 255, 0, 255).astype(np.uint8)
+                        preview_out.write_image(preview_pixels)
+                    finally:
+                        preview_out.close()
             last_path = output_path
 
         log.debug(f"Save completed. Last path: {last_path}")
         return (str(last_path),)
 
 
+class OIIO_ColorspaceMatchFinder:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original_image": ("IMAGE",),
+                "processed_image": ("IMAGE",),
+                "num_results": ("INT", {"default": 5, "min": 1, "max": 20}),
+                "metrics": (["mse", "psnr", "both"], {"default": "both"}),
+                "scale_factor": ("FLOAT", {"default": 0.25, "min": 0.1, "max": 1.0, "step": 0.05}),
+                "print_every": ("INT", {"default": 1000, "min": 100, "max": 10000}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("matches", "errors")
+    FUNCTION = "find_matches"
+    CATEGORY = "oiio"
+
+    def compute_metrics(self, img1: torch.Tensor, img2: torch.Tensor) -> tuple[float, float]:
+        mse = torch.mean((img1 - img2) ** 2).item()
+        psnr = 20 * np.log10(1.0 / np.sqrt(mse)) if mse > 0 else float("inf")
+        return mse, psnr
+
+    def format_current_results(
+        self, top_results: list[Any], metrics: str, tested: int, successful: int, failed: int
+    ) -> str:
+        lines = [
+            f"\nInterim results after {tested} combinations (successful: {successful}, failed: {failed}):"
+        ]
+
+        results = sorted(top_results, key=lambda x: x[0])
+        if metrics in ["psnr", "both"]:
+            results.reverse()
+
+        for i, (score, r) in enumerate(results):
+            if metrics == "mse":
+                lines.append(
+                    f"{i + 1}. Input: {r['input_cs']}, Output: {r['output_cs']} (MSE: {r['mse']:.6f})"
+                )
+            elif metrics == "psnr":
+                lines.append(
+                    f"{i + 1}. Input: {r['input_cs']}, Output: {r['output_cs']} (PSNR: {r['psnr']:.2f}dB)"
+                )
+            else:
+                lines.append(
+                    f"{i + 1}. Input: {r['input_cs']}, Output: {r['output_cs']} (MSE: {r['mse']:.6f}, PSNR: {r['psnr']:.2f}dB)"
+                )
+        return "\n".join(lines)
+
+    def find_matches(
+        self, original_image, processed_image, num_results, metrics, scale_factor, print_every
+    ):
+        converter = OIIO_ColorspaceConvert()
+        colorspaces = [cs for cs in converter.get_colorspaces() if cs != "auto"]
+        error_counter: dict[str, Counter] = {}
+
+        if scale_factor < 1.0:
+            h = int(original_image.shape[1] * scale_factor)
+            w = int(original_image.shape[2] * scale_factor)
+            orig_buf, orig_roi = OIIOUtils.comfy_to_oiio(original_image)
+            proc_buf, proc_roi = OIIOUtils.comfy_to_oiio(processed_image)
+            scaled_orig = oiio.ImageBuf(oiio.ImageSpec(w, h, original_image.shape[3], oiio.FLOAT))
+            scaled_proc = oiio.ImageBuf(oiio.ImageSpec(w, h, processed_image.shape[3], oiio.FLOAT))
+            oiio.ImageBufAlgo.resize(scaled_orig, orig_buf)
+            oiio.ImageBufAlgo.resize(scaled_proc, proc_buf)
+
+            original = OIIOUtils.oiio_to_comfy(scaled_orig, scaled_orig.roi)
+            processed = OIIOUtils.oiio_to_comfy(scaled_proc, scaled_proc.roi)
+
+            del orig_buf, proc_buf, scaled_orig, scaled_proc
+        else:
+            original = original_image.float()
+            processed = processed_image.float()
+
+        total_combos = len(colorspaces) * len(colorspaces)
+        tested = successful = failed = 0
+        top_results = []
+
+        proc_buf, proc_roi = OIIOUtils.comfy_to_oiio(processed)
+
+        try:
+            for in_cs, out_cs in itertools.product(colorspaces, colorspaces):
+                tested += 1
+                combo = f"{in_cs} -> {out_cs}"
+
+                if tested % print_every == 0:
+                    log.info(
+                        self.format_current_results(
+                            top_results, metrics, tested, successful, failed
+                        )
+                    )
+                    gc.collect()
+                try:
+                    out_buf = OIIOUtils.convert_colorspace(proc_buf, in_cs, out_cs, proc_roi)
+                    converted = OIIOUtils.oiio_to_comfy(out_buf, proc_roi)
+                    mse, psnr = self.compute_metrics(original, converted)
+                    if metrics == "mse":
+                        score = -mse
+                    elif metrics == "psnr":
+                        score = psnr
+                    else:
+                        score = psnr / mse
+
+                    entry = (
+                        score,
+                        {"input_cs": in_cs, "output_cs": out_cs, "mse": mse, "psnr": psnr},
+                    )
+
+                    if len(top_results) < num_results:
+                        heapq.heappush(top_results, entry)
+                    else:
+                        if entry[0] > top_results[0][0]:
+                            heapq.heapreplace(top_results, entry)
+
+                    successful += 1
+                except Exception as e:
+                    failed += 1
+                    error_msg = str(e)
+                    if error_msg not in error_counter:
+                        error_counter[error_msg] = Counter()
+                    error_counter[error_msg][combo] += 1
+
+                if "out_buf" in locals():
+                    del out_buf
+
+        finally:
+            del proc_buf
+
+        output_lines = [
+            f"Best colorspace combinations (tested {tested}, successful: {successful}, failed: {failed}):"
+        ]
+
+        results = []
+        while top_results:
+            score, result = heapq.heappop(top_results)
+            if metrics == "mse":
+                # back to positive
+                result["score"] = -score
+            else:
+                result["score"] = score
+            results.append(result)
+
+        for i, (score, r) in enumerate(results):
+            if metrics == "mse":
+                output_lines.append(
+                    f"{i + 1}. Input: {r['input_cs']}, Output: {r['output_cs']} (MSE: {r['mse']:.6f})"
+                )
+            elif metrics == "psnr":
+                output_lines.append(
+                    f"{i + 1}. Input: {r['input_cs']}, Output: {r['output_cs']} (PSNR: {r['psnr']:.2f}dB)"
+                )
+            else:
+                output_lines.append(
+                    f"{i + 1}. Input: {r['input_cs']}, Output: {r['output_cs']} (MSE: {r['mse']:.6f}, PSNR: {r['psnr']:.2f}dB)"
+                )
+
+        error_lines = ["Colorspace conversion errors:"]
+        for error_msg, combos in error_counter.items():
+            error_lines.append(f"\nError: {error_msg}")
+            error_lines.append(
+                f"Occurred {sum(combos.values())} times with {len(combos)} different combinations"
+            )
+            error_lines.append("Top 5 most frequent combinations:")
+            for combo, count in combos.most_common(5):
+                error_lines.append(f"  {combo}: {count} times")
+
+        return ("\n".join(output_lines), "\n".join(error_lines))
+
+
 NODE_CLASS_MAPPINGS = {
+    "OIIO_ColorspaceMatchFinder": OIIO_ColorspaceMatchFinder,
     "OIIO_LoadImage": OIIO_LoadImage,
     "OIIO_ColorspaceConvert": OIIO_ColorspaceConvert,
     "OIIO_SaveImage": OIIO_SaveImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "OIIO_ColorspaceMatchFinder": "Colorspace Match Finder (OIIO)",
     "OIIO_ColorspaceConvert": "Colorspace Convert (OIIO)",
     "OIIO_LoadImage": "Load Image (OIIO)",
     "OIIO_SaveImage": "Save Image (OIIO)",
