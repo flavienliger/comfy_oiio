@@ -327,12 +327,12 @@ class OIIO_SaveImage:
                 ),
                 "output_colorspace": (
                     colorspaces,
-                    {"default": "scene_linear"},
+                    {"default": "sRGB"},
                 ),
                 "frame_start": ("INT", {"default": 1, "min": 0, "max": 999999}),
                 "frame_pad": ("INT", {"default": 4, "min": 1, "max": 8}),
                 "dwa_compression_level": ("FLOAT", {"default": 45.0, "min": 10.0, "max": 250.0}),
-                "save_preview": ("BOOLEAN", {"default": True}),
+                "save_preview": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
                 "prompt": "PROMPT",
