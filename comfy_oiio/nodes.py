@@ -133,7 +133,7 @@ def retrieve_sequence(filepath:str) -> List[str]:
         if files:
             return [files[0]]
         if sequences:
-            return sequences[0]
+            return list(sequences[0])
 
         raise ValueError(f"No readable images found in {filepath}")
 
