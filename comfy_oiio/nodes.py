@@ -1,17 +1,20 @@
+import re
 import gc
 import heapq
 import itertools
 import json
+import glob
 from collections import Counter
 from logging import getLogger
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 import folder_paths
 import numpy as np
 import OpenImageIO as oiio
 import torch
 from OpenImageIO import ImageSpec
+import clique
 
 log = getLogger("comfy-oiio")
 
@@ -113,6 +116,35 @@ class OIIOUtils:
         )
 
 
+def retrieve_sequence(filepath:str) -> List[str]:
+    # final result: dir/file.%04d.exr [100-200]
+
+    # if missing frame range, glob into the folder
+    if " [" not in filepath:
+        filepath = re.sub(r"#+", "*", filepath)
+        filepath = re.sub(r"%0\d+d", "*", filepath)
+
+        sequences, files = clique.assemble(
+            glob.glob(filepath),
+            patterns=[clique.PATTERNS["frames"]],
+            assume_padded_when_ambiguous=True,
+        )
+        # find only one file
+        if files:
+            return [files[0]]
+        if sequences:
+            return sequences[0]
+
+        raise ValueError(f"No readable images found in {filepath}")
+
+    # file.####.exr [1-2] => file.%04d.exr [1-2]
+    elif "#" in filepath:
+        padding = filepath.count("#")
+        filepath = filepath.replace("#"*padding, f"%0{padding}d")
+    
+    return list(clique.parse(filepath))
+
+
 class OIIO_LoadImage:
     @classmethod
     def INPUT_TYPES(cls):
@@ -136,11 +168,16 @@ class OIIO_LoadImage:
     def read(self, filepath="", precision="auto", input_transform="auto"):
         path = Path(filepath)
 
-        if path.is_dir():
+        if path.is_dir() or "%" in filepath or "#" in filepath:
+            content = path.iterdir()
+            if not path.is_dir():
+                content = retrieve_sequence(filepath)
+                log.debug(f"Load {content.__len__()} images from sequence")
+
             pixels_list = []
             masks_list = []
             xres = yres = None
-            for f in sorted(path.iterdir()):
+            for f in sorted(content):
                 try:
                     result = self.read_single(f, precision, input_transform)
                     if result is None:
